@@ -38,7 +38,7 @@ jobs:
       - name: Run Gemini and Update JSON File
         env:
           # 匯入 GitHub Secrets 中名為 GEMINICLI_KEY 的金鑰
-          GEMINI_API_KEY: ${{ secrets.GEMINICLI_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_KEY }}
         run: |
           FILENAME="content.json"
 
