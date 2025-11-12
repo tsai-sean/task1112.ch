@@ -1,0 +1,104 @@
+# Workflow 的名稱
+name: 每天讓 GEMINI 生成一段名言佳句
+
+# 觸發 Workflow 的條件
+on:
+  workflow_dispatch: # 允許手動觸發
+  schedule:
+    # 使用 cron 語法來設定定時執行
+    # '30 01 * * *' 表示在 UTC 01:30 執行
+    - cron: '30 01 * * *' # 換算成台灣時間 (UTC+8) 是早上 09:30
+
+# 工作內容 > 基於 ubuntu(linux) 執行 run-gemini-cli
+jobs:
+  run-gemini-cli:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 允許讀寫
+    steps:
+      # 步驟 1: 將專案檔案 checkout 到執行環境
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 步驟 2-1: 設定 Node.js v20 環境
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 步驟 2-2: 全域安裝最新版的 @google/gemini-cli
+      - name: Install Gemini CLI globally
+        run: npm install -g @google/gemini-cli@latest
+
+      # 步驟 2-3: 安裝 jq (用於安全地處理 JSON 資料)
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+        
+      # 步驟 3: 執行 GeminiCLI 並更新 JSON 檔案
+      - name: Run Gemini and Update JSON File
+        env:
+          # 匯入 GitHub Secrets 中名為 GEMINICLI_KEY 的金鑰
+          GEMINI_API_KEY: ${{ secrets.GEMINICLI_KEY }}
+        run: |
+          FILENAME="content.json"
+
+          # A. 取得台北時區的當前日期與時間
+          DATE_TAIPEI=$(TZ="Asia/Taipei" date +'%Y-%m-%d %H:%M:%S')
+          echo "當前台北時間: $DATE_TAIPEI"
+
+          # B. 詢問 geminicli 指令取得名言
+          echo "執行 Gemini CLI 詢問名言佳句..."
+          # 使用 gemini-2.5-flash 模型，並限制輸出格式，只取最後一行結果
+          QUOTE_RAW=$(gemini generate \
+            --model gemini-2.5-flash \
+            "生成一段簡短且富有啟發性的中文名言佳句，內容需包含名言佳句本身和作者，格式為：『名言佳句』— 作者。不要包含任何多餘的解釋或引言。" | tail -n 1)
+
+          # 清理 gemini 輸出，移除前後空白或換行符
+          CLEAN_QUOTE=$(echo "$QUOTE_RAW" | sed 's/^ *//; s/ *$//' | tr -d '\n\r')
+          
+          if [ -z "$CLEAN_QUOTE" ]; then
+              echo "❌ 警告: Gemini 生成內容為空，跳過本次寫入。"
+              exit 0 # 成功退出，但不執行後續 commit
+          fi
+          
+          echo "✨ 生成的名言: $CLEAN_QUOTE"
+          
+          # C. 確認 content.json 是否存在，若無則創建空陣列
+          if [ ! -f "$FILENAME" ]; then
+            echo "[]" > "$FILENAME"
+            echo "ℹ️ $FILENAME 不存在，已創建空陣列。"
+          fi
+
+          # D. 建立新的 JSON 物件並附加到現有檔案
+          # 1. 建立新的 JSON 項目
+          NEW_ENTRY=$(jq -n \
+            --arg date "$DATE_TAIPEI" \
+            --arg poem "$CLEAN_QUOTE" \
+            '{date: $date, poem: $poem}')
+
+          # 2. 將新的物件附加到現有的 JSON 陣列中 (寫入暫存檔)
+          # 使用 tempfile 確保寫入安全，並將新內容放在最前面 (最新名言在頂部)
+          TEMP_FILE=$(mktemp)
+          jq --argjson new_entry "$NEW_ENTRY" '[$new_entry] + .' "$FILENAME" > "$TEMP_FILE"
+          mv "$TEMP_FILE" "$FILENAME"
+          
+          echo "✅ 名言佳句已成功寫入 $FILENAME。"
+
+      # 步驟 4: Commit 並 Push 更新後的 JSON 檔案
+      - name: Commit and Push changes
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          
+          # 只 add content.json 這個檔案
+          git add content.json
+
+          # 檢查是否有檔案變更，如果有才執行 commit 和 push
+          # 注意：這裡使用 TZ="Asia/Taipei" 確保 commit message 中的日期是台灣時間
+          if ! git diff --staged --quiet; then
+            COMMIT_DATE=$(TZ="Asia/Taipei" date +'%Y-%m-%d')
+            git commit -m "feat(bot): ✨ 新增 ${COMMIT_DATE} 的名言佳句"
+            git push
+          else
+            echo "沒有變更，無需 commit。"
+          fi
